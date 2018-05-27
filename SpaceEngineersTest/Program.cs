@@ -77,6 +77,7 @@ namespace IngameScript
             }
             clear();
             suppressWarnings = false;
+            trackedBlocks = new List<IMyTerminalBlock>();
         }
 
         public void Save()
@@ -429,6 +430,20 @@ namespace IngameScript
             }
         }
 
+        //TODO: expose this as a command
+        private void trackBlocksReset()
+        {
+            GridTerminalSystem.GetBlocks(trackedBlocks);
+        }
+
+        //TODO: call this from update()
+        private void trackBlocksCheck()
+        {
+            GridTerminalSystem.GetBlocksOfType(blocks, block => block.IsFunctional);
+            var damagedBlocks = trackedBlocks.Except(blocks);
+            //TODO: do stuff with damaged blocks
+        }
+
         private void print(string text) {
             msg += text;
         }
@@ -457,5 +472,6 @@ namespace IngameScript
 
         Dictionary<string, VRage.MyFixedPoint> preferredItemCounts;
         Dictionary<string, IMyInteriorLight> indicators;
+        List<IMyTerminalBlock> trackedBlocks;
     }
 }
