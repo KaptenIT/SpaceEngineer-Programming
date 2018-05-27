@@ -36,3 +36,6 @@ bin/
 MDK/
 obj/
 *.bak
+*.csproj
+.vs/
+
