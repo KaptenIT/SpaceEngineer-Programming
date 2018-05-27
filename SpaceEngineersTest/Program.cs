@@ -129,6 +129,16 @@ namespace IngameScript
                         cmdHangar(args);
                     }
                     break;
+                case "integrity-init":
+                    if (args.Length < 2)
+                    {
+                        println($"INTEGRITY-INIT command takes no arguments, { args.Length - 1 } given!");
+                    }
+                    else
+                    {
+                        trackBlocksReset();
+                    }
+                    break;
 
                 default:
                     println("Invalid command, available commands are:\n GET, CLEAR, WARNINGS");
@@ -387,6 +397,8 @@ namespace IngameScript
             }
 
             updateIndicators(itemCounts);
+
+            trackBlocksCheck();
         }
 
         private void updateIndicators(Dictionary<string, VRage.MyFixedPoint> itemCounts) {
@@ -442,6 +454,15 @@ namespace IngameScript
             GridTerminalSystem.GetBlocksOfType(blocks, block => block.IsFunctional);
             var damagedBlocks = trackedBlocks.Except(blocks);
             //TODO: do stuff with damaged blocks
+            trackedBlockStatus = "";
+            foreach (var block in damagedBlocks)
+            {
+                trackedBlockStatus += $"  { block.CustomName }\n";
+            }
+            if (trackedBlockStatus != "")
+            {
+                trackedBlockStatus = "Damaged blocks:\n" + trackedBlockStatus;
+            }
         }
 
         private void print(string text) {
@@ -462,6 +483,10 @@ namespace IngameScript
 
         void flush() {
             Echo(msg);
+            Echo(trackedBlockStatus);
+            var lcd = GridTerminalSystem.GetBlockWithName("LCD block damage") as IMyTextPanel;
+            if(lcd != null)
+                lcd.WritePublicText(trackedBlockStatus, false);
         }
 
         string msg;
@@ -473,5 +498,6 @@ namespace IngameScript
         Dictionary<string, VRage.MyFixedPoint> preferredItemCounts;
         Dictionary<string, IMyInteriorLight> indicators;
         List<IMyTerminalBlock> trackedBlocks;
+        string trackedBlockStatus;
     }
 }
