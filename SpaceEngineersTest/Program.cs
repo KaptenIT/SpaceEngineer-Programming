@@ -54,27 +54,20 @@ namespace IngameScript
 
             blocks = new List<IMyTerminalBlock>();
 
-            preferredItemCounts = new Dictionary<string, VRage.MyFixedPoint>() {
-                { "Gold",       1000 },
-                { "Silver",     1000 },
-                { "Magnesium",  1000 },
-                { "Silicon",    1000 },
-                { "Iron",       1000 },
-                { "Nickel",     1000 },
-                { "Ice",        1000 },
-                { "Stone",      1000 },
-                { "Cobalt",     1000 },
-                { "Uranium",    1000 },
+            itemFactors = new Dictionary<string, double>() {
+                { "Uranium Ingot",    1.0 },
+                { "Silver Ingot",     1.0 },
+                { "Magnesium Powder",  2.0 },
+                { "Silicon Wafer",    4.0 },
+                { "Platinum Ingot",    4.0 },
+                { "Gold Ingot",       4.0 },
+                { "Cobalt Ingot",     8.0 },
+                { "Nickel Ingot",     16.0 },
+                { "Iron Ingot",       64.0 },
             };
 
 
-            indicators = new Dictionary<string, IMyInteriorLight>();
-            foreach (var elem in preferredItemCounts) {
-                var item = elem.Key;
-
-                var block = GridTerminalSystem.GetBlockWithName("Indicator " + item) as IMyInteriorLight;
-                indicators.Add(item, block);
-            }
+            
             clear();
             suppressWarnings = false;
             trackedBlocks = new List<IMyTerminalBlock>();
@@ -395,31 +388,231 @@ namespace IngameScript
                         itemCounts.Add(name, item.Amount);
                 }
             }
-
-            updateIndicators(itemCounts);
-
+            //updateRefineries(itemCounts);
+            updateHydrogenFuel(itemCounts);
             trackBlocksCheck();
         }
 
-        private void updateIndicators(Dictionary<string, VRage.MyFixedPoint> itemCounts) {
+        private void updateHydrogenFuel(Dictionary<string, VRage.MyFixedPoint> itemCounts) {
+            double iceCount = (double)itemCounts["Ice"];
+            double iceMass = iceCount * ORE_MASS_PER_COUNT;
 
-            foreach (var elem in preferredItemCounts) {
-                var item = elem.Key;
-                var preferredItemCount = elem.Value;
+            GridTerminalSystem.GetBlocksOfType<IMyGasTank>(blocks);
+            GridTerminalSystem.SearchBlocksOfName("Gydrogen Tank", blocks);
+            var sum = 0.0;
+            foreach (var block in blocks) {
+                var tank = block as IMyGasTank;
+                sum += tank.FilledRatio;
+            }
+            var totalFilledRatio = sum / blocks.Count;
+            //TODO: do stuff with totalFilledRatio
+        }
 
-                //Indicates whether the current item count is within the preferred limit
-                var withinLimit = itemCounts.ContainsKey(item) && itemCounts[item] >= preferredItemCount;
 
-                var indicatorName = "Indicator " + item;
+        /// <summary>
+        /// Gets ore name from corresponding ingot name. For example "Iron Ingot" becomes "Iron"
+        /// </summary>
+        /// <param name="ingotName">Ingot name</param>
+        /// <returns>Ore name</returns>
+        private string getOreFromIngotName(string ingotName) {
+            return ingotName.Split(' ').First();
+        }
 
-                if (!indicators.ContainsKey(item))
-                    if(!suppressWarnings) println($"Warning could not find light '{ indicatorName }', (not in list)");
-                else if (indicators[item] == null)
-                    if (!suppressWarnings) println($"Warning could not find light '{ indicatorName }', (was NULL)");
-                else
-                    indicators[item].Enabled = withinLimit;
+        /// <summary>
+        /// Get priority value representing how high the priority currently is to refine a specific metal
+        ///
+        /// Low value means high priority
+        /// </summary>
+        /// <param name="itemCounts"></param>
+        /// <param name="elem"></param>
+        /// <returns>Low value means high priority</returns>
+        private double getPrio(Dictionary<string, VRage.MyFixedPoint> itemCounts, KeyValuePair<string, double> elem) {
+            var itemName = elem.Key;
+            var factor = elem.Value;
+            var itemCount = itemCounts.ContainsKey(elem.Key) ?
+                            itemCounts[itemName] : 0;
+            return (double)itemCount / factor;
+        }
+
+        /// <summary>
+        /// Updates refineries to produce what is currently most needed
+        /// </summary>
+        /// <param name="itemCounts"></param>
+        private void updateRefineries(Dictionary<string, VRage.MyFixedPoint> itemCounts) {
+            var ingotName = itemFactors
+                .Where(elem => {
+                    var oreName = getOreFromIngotName(elem.Key);
+
+                    //It is only possible to refine a material that exists
+                    return itemCounts.ContainsKey(oreName) && itemCounts[oreName] > 10;
+                })
+                .Aggregate((minElem, nextElem) => 
+                    getPrio(itemCounts, minElem) < getPrio(itemCounts, nextElem) ? minElem : nextElem
+                ).Key;
+
+            var oreToRefine = getOreFromIngotName(ingotName);
+
+            GridTerminalSystem.GetBlocksOfType<IMyRefinery>(blocks, refinery => {
+                var refineryInput = refinery.GetInventory(0).GetItems();
+
+                //Check if the refinery is doing anything it shouldn't
+                return refineryInput.Count == 0 || 
+                    refineryInput.Exists(item => item.Content.SubtypeName != oreToRefine);
+            });
+
+            var containers = new List<IMyCargoContainer>();
+
+            GridTerminalSystem.GetBlocksOfType(containers);
+
+            var resourceAavailable = itemCounts[oreToRefine];
+            var resourcePerRefinery = (double)resourceAavailable / blocks.Count;
+
+            foreach (var block in blocks) {
+                var rebeliousRefinery = block as IMyRefinery;
+                var refInventory = rebeliousRefinery.GetInventory(0);
+
+                dumpItems(refInventory, containers, (name => name != oreToRefine));
+                var amountAlreadyInRef = (double)getItemAmount(refInventory, name => name == oreToRefine);
+
+                //If refinery has too much resource, dump it
+                if (amountAlreadyInRef > resourcePerRefinery)
+                    dumpItems(refInventory, containers, (name => name == oreToRefine));
+                else//If refinery does not have enough, request more
+                    requestItems(refInventory, oreToRefine, resourcePerRefinery - amountAlreadyInRef, containers);
+            }
+        }
+
+
+
+        /// <summary>
+        /// Dump items from dst into specified destinations
+        /// Items will dumped to destinations[0] first and if destinations[0] gets filled up, destinations[1] will be dumped into and so on.
+        /// 
+        /// Note: filter() == true is for what items to MOVE
+        /// </summary>
+        /// <param name="src">Inventory to dump</param>
+        /// <param name="destinations">List of inventories to put items into</param>
+        /// <param name="filter">Filter deciding what items to move</param>
+        /// <param name="amountToDump">Total amount of items to dump</param>
+        /// <returns>Amount of items matching filter still left</returns>
+        private double dumpItems(IMyInventory src, List<IMyCargoContainer> destinations, Func<string, bool> filter = null, double amountToDump = double.MaxValue) {
+            double amountDumped = 0;
+            for (int i = 0; i < destinations.Count && src.CurrentVolume != 0 && amountDumped <= amountToDump; i++) {
+                var containerInventory = destinations[i].GetInventory(0);
+                amountDumped += moveItems(src, containerInventory, filter, amountToDump);
             }
 
+            return (double)getItemAmount(src, filter);
+        }
+
+        /// <summary>
+        /// Request items from any of the specified sources into the destination
+        /// </summary>
+        /// <param name="dst"></param>
+        /// <param name="requestedItem">Name of item to move</param>
+        /// <param name="requestedAmount">How many items to move</param>
+        /// <param name="sources">list of inventorys to take items from</param>
+        /// <returns>Total amount of items moved</returns>
+        private double requestItems(IMyInventory dst, string requestedItem, double requestedAmount, List<IMyCargoContainer> sources)
+        {
+            double transferredAmount = 0.0;
+
+            for (int i = 0; i < sources.Count; i++) {
+                transferredAmount += moveItems(sources[i].GetInventory(), dst, (name => name == requestedItem), requestedAmount);
+            }
+            return transferredAmount;
+        }
+
+        /// <summary>
+        /// Request items from any of the specified sources into the destination
+        /// </summary>
+        /// <param name="dst"></param>
+        /// <param name="filter">Decides what items to move</param>
+        /// <param name="requestedAmount">How many items to move</param>
+        /// <param name="sources">list of inventorys to take items from</param>
+        /// <returns>Total amount of items moved</returns>
+        private double requestItems(IMyInventory dst, Func<string, bool> filter, double requestedAmount, List<IMyCargoContainer> sources) {
+            double transferredAmount = 0.0;
+
+            for (int i = 0; i < sources.Count; i++) {
+                transferredAmount += moveItems(sources[i].GetInventory(), dst, filter, requestedAmount);
+            }
+            return transferredAmount;
+        }
+
+        
+        /// <summary>
+        /// Tries to move a total of 'requestedAmount' of items matching fitler from src to dst.
+        /// 
+        /// EXAMPLE: moveItems(src, dst, name => name.Contains("Plate"), 10);
+        /// where src contains 5 'Steel Plates' and 5 'Interior Plate' will return 10.0
+        /// </summary>
+        /// <param name="src">Source</param>
+        /// <param name="dst">Destination</param>
+        /// <param name="filter">Filter used to determine what items to move</param>
+        /// <param name="requestedAmount">Amount of items to move</param>
+        /// <returns>Totalamount of actually moved items</returns>
+        private double moveItems(IMyInventory src, IMyInventory dst, Func<string, bool> filter = null, double requestedAmount = double.MaxValue)
+        {
+            double totalAmountTransferred = 0.0;
+
+            var srcItems = src.GetItems();
+            for (int i = 0; i < srcItems.Count && !dst.IsFull;) {
+                string name = srcItems[i].Content.SubtypeName;
+                if (filter != null && !filter(name)) {
+                    i++;
+                    continue;
+                }
+
+                var amountAvailable = srcItems[i].Amount;
+                var amountToTransfer = (VRage.MyFixedPoint)min((double)amountAvailable, requestedAmount - totalAmountTransferred);
+                if (requestedAmount <= totalAmountTransferred)
+                    return totalAmountTransferred;
+
+                var amountBefore = getItemAmount(dst, filter);
+
+                var b = src.TransferItemTo(dst, i, null, true, amountToTransfer);
+
+                var amountAfter = getItemAmount(dst, filter);
+                var transferedAmount = (double)(amountAfter - amountBefore);
+
+                //Destination is full
+                if (transferedAmount < 0.01)
+                    return totalAmountTransferred;
+
+                totalAmountTransferred += transferedAmount;
+            }
+            return totalAmountTransferred;
+        }
+
+
+        /// <summary>
+        /// Get the amount of items matching the filter, if no filter is specified the total amount is returned
+        /// </summary>
+        /// <param name="inventory"></param>
+        /// <param name="filter"></param>
+        /// <returns>Amount of items matching filter if specified</returns>
+        private VRage.MyFixedPoint getItemAmount(IMyInventory inventory, Func<string, bool> filter = null)
+        {
+            VRage.MyFixedPoint amount = 0;
+
+            var items = inventory.GetItems();
+
+            if (filter == null) {
+                foreach (var item in items) {
+                    amount += item.Amount;
+                }
+            }
+            else {
+                foreach (var item in items.Where(item => filter(item.Content.SubtypeName))) {
+                    amount += item.Amount;
+                }
+            }
+            return amount;
+        }
+
+        private double min(double a, double b) {
+            return a < b ? a : b;
         }
 
         private void getAllNames() {
@@ -489,14 +682,16 @@ namespace IngameScript
                 lcd.WritePublicText(trackedBlockStatus, false);
         }
 
+        const double ORE_MASS_PER_COUNT = 2.7;
+
+
         string msg;
         bool suppressWarnings;
 
         //Scratch container for blocks
         List<IMyTerminalBlock> blocks;
 
-        Dictionary<string, VRage.MyFixedPoint> preferredItemCounts;
-        Dictionary<string, IMyInteriorLight> indicators;
+        Dictionary<string, double> itemFactors;
         List<IMyTerminalBlock> trackedBlocks;
         string trackedBlockStatus;
     }
