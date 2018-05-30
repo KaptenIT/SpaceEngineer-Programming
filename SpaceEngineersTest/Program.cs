@@ -55,21 +55,20 @@ namespace IngameScript
             blocks = new List<IMyTerminalBlock>();
 
             itemFactors = new Dictionary<string, double>() {
-                { "Uranium Ingot",    1.0 },
-                { "Silver Ingot",     1.0 },
-                { "Magnesium Powder",  2.0 },
-                { "Silicon Wafer",    4.0 },
-                { "Platinum Ingot",    4.0 },
-                { "Gold Ingot",       4.0 },
-                { "Cobalt Ingot",     8.0 },
-                { "Nickel Ingot",     16.0 },
-                { "Iron Ingot",       64.0 },
+                { "Ingot Uranium",    1.0 },
+                { "Ingot Silver",     1.0 },
+                { "Ingot Magnesium",  2.0 },
+                { "Ingot Silicon",    4.0 },
+                { "Ingot Platinum",    4.0 },
+                { "Ingot Gold",       4.0 },
+                { "Ingot Cobalt",     8.0 },
+                { "Ingot Nickel",     16.0 },
+                //{ "Iron Ingot",       64.0 },
             };
 
 
             
             clear();
-            suppressWarnings = false;
             trackedBlocks = new List<IMyTerminalBlock>();
         }
 
@@ -105,14 +104,6 @@ namespace IngameScript
                 case "clear":
                     clear();
                     break;
-                case "warnings":
-                    if (args.Length != 2) {
-                        println($"Get command takes one argument, { args.Length - 1 } given!");
-                    }
-                    else {
-                        cmdWarnings(args[1]);
-                    }
-                    break;
 
                 case "hangar":
                     if (args.Length < 2) {
@@ -134,7 +125,7 @@ namespace IngameScript
                     break;
 
                 default:
-                    println("Invalid command, available commands are:\n GET, CLEAR, WARNINGS");
+                    println("Invalid command, available commands are:\n GET, CLEAR, HANGAR, INTEGRITY-INIT");
                     break;
             }
             flush();
@@ -181,25 +172,6 @@ namespace IngameScript
                 var vent = block as IMyAirVent;
 
                 println(vent.CustomName + (vent.CanPressurize ? ": Airtight" : ": Leak"));
-            }
-        }
-
-        void cmdWarnings(string arg) {
-            switch(arg) {
-                case "on":
-                case "ON":
-                case "On":
-                    suppressWarnings = false;
-                    break;
-                case "off":
-                case "OFF":
-                case "Off":
-                    suppressWarnings = true;
-                    break;
-
-                default:
-                    println("Warnings command only takes arguments ON or OFF");
-                    break;
             }
         }
 
@@ -376,11 +348,9 @@ namespace IngameScript
 
             Dictionary<string, VRage.MyFixedPoint> itemCounts = new Dictionary<string, VRage.MyFixedPoint>();
 
-            foreach (var inventory in inventories)
-            {
-                foreach (var item in inventory.GetInventory(0).GetItems())
-                {
-                    var name = item.Content.SubtypeName;
+            foreach (var inventory in inventories) {
+                foreach (var item in inventory.GetInventory(0).GetItems()) {
+                    var name = getName(item);
                     
                     if (itemCounts.ContainsKey(name))
                         itemCounts[name] += item.Amount;
@@ -388,9 +358,24 @@ namespace IngameScript
                         itemCounts.Add(name, item.Amount);
                 }
             }
-            //updateRefineries(itemCounts);
-            updateHydrogenFuel(itemCounts);
-            trackBlocksCheck();
+
+            clear();
+            println("Begin");
+
+            foreach (var elem in itemCounts) {
+                println($"{ elem.Key }: amount: { elem.Value }");
+            }
+
+            /*foreach (var elem in itemFactors) {
+                if (itemCounts.ContainsKey(elem.Key))
+                    println($"{ elem.Key }: factor: { elem.Value }, prio: { getPrio(itemCounts, elem) }");
+            }*/
+
+            println("End");
+
+            manageItems(itemCounts);
+            //updateHydrogenFuel(itemCounts);
+            //trackBlocksCheck();
         }
 
         private void updateHydrogenFuel(Dictionary<string, VRage.MyFixedPoint> itemCounts) {
@@ -408,61 +393,106 @@ namespace IngameScript
             //TODO: do stuff with totalFilledRatio
         }
 
+        private void manageItems(Dictionary<string, VRage.MyFixedPoint> itemCounts) {
+            var containers = new List<IMyCargoContainer>();
 
-        /// <summary>
-        /// Gets ore name from corresponding ingot name. For example "Iron Ingot" becomes "Iron"
-        /// </summary>
-        /// <param name="ingotName">Ingot name</param>
-        /// <returns>Ore name</returns>
-        private string getOreFromIngotName(string ingotName) {
-            return ingotName.Split(' ').First();
+            GridTerminalSystem.GetBlocksOfType(containers, container => container.CubeGrid == Me.CubeGrid);
+
+            //Only do one sorting operation per update()
+            switch (itemTickTock) {
+                case 0:
+                    updateRefineries(containers, itemCounts);
+                    break;
+                case 1:
+                    //Clear all connectors
+                    GridTerminalSystem.GetBlocksOfType<IMyShipConnector>(blocks);
+                    foreach (var block in blocks) {
+                        var connector = block as IMyShipConnector;
+                        dumpItems(connector.GetInventory(), containers);
+                    }
+                    break;
+                case 2:
+                    //Collect refined ore from refineries
+                    GridTerminalSystem.GetBlocksOfType<IMyRefinery>(blocks);
+                    foreach (var block in blocks) {
+                        var refinery = block as IMyRefinery;
+                        var refineryOutput = refinery.GetInventory(1);
+                        dumpItems(refineryOutput, containers);
+                    }
+                    break;
+                case 3:
+                    //Collect all ore from docked ships
+                    GridTerminalSystem.GetBlocksOfType(blocks, block => block.HasInventory && block.CubeGrid != Me.CubeGrid);
+                    foreach (var block in blocks) {
+                        for (int i = 0; i < block.InventoryCount; i++) {
+                            var inventory = block.GetInventory(i);
+                            dumpItems(inventory, containers, name => {
+                                return name.Contains("Ore") && !name.Contains("Ice");
+                            });
+                        }
+                    }
+                    break;
+                default:
+                    break;
+            }
+            itemTickTock = (itemTickTock + 1) % 4;
         }
 
-        /// <summary>
-        /// Get priority value representing how high the priority currently is to refine a specific metal
-        ///
-        /// Low value means high priority
-        /// </summary>
-        /// <param name="itemCounts"></param>
-        /// <param name="elem"></param>
-        /// <returns>Low value means high priority</returns>
-        private double getPrio(Dictionary<string, VRage.MyFixedPoint> itemCounts, KeyValuePair<string, double> elem) {
-            var itemName = elem.Key;
-            var factor = elem.Value;
-            var itemCount = itemCounts.ContainsKey(elem.Key) ?
-                            itemCounts[itemName] : 0;
-            return (double)itemCount / factor;
-        }
+        void sortInventory(List<IMyCargoContainer> containers) {
 
+            
+        }
+        
         /// <summary>
         /// Updates refineries to produce what is currently most needed
         /// </summary>
         /// <param name="itemCounts"></param>
-        private void updateRefineries(Dictionary<string, VRage.MyFixedPoint> itemCounts) {
-            var ingotName = itemFactors
+        private void updateRefineries(List<IMyCargoContainer> containers, Dictionary<string, VRage.MyFixedPoint> itemCounts) {
+            var sorted = itemFactors
                 .Where(elem => {
                     var oreName = getOreFromIngotName(elem.Key);
-
                     //It is only possible to refine a material that exists
-                    return itemCounts.ContainsKey(oreName) && itemCounts[oreName] > 10;
+                    return itemCounts.ContainsKey(oreName)/* && itemCounts[oreName] > 10*/;
                 })
-                .Aggregate((minElem, nextElem) => 
-                    getPrio(itemCounts, minElem) < getPrio(itemCounts, nextElem) ? minElem : nextElem
-                ).Key;
+                .OrderBy(elem => 
+                    getPrio(itemCounts, elem)
+                );
 
-            var oreToRefine = getOreFromIngotName(ingotName);
+            string oreToRefine = "None";
+            double bestPrio = double.MaxValue;
+
+            foreach(var elem in itemFactors) {
+                var oreName = getOreFromIngotName(elem.Key);
+                println($"{ elem.Key }: Ore name: { oreName }");
+                if (itemCounts.ContainsKey(oreName)) {
+                    if (getPrio(itemCounts, elem) < bestPrio) {
+                        //println($"{ elem.Key }: prio: { getPrio(itemCounts, elem) } < { oreToRefine }: prio: { bestPrio }");
+                        oreToRefine = oreName;
+                        bestPrio = getPrio(itemCounts, elem);
+                    }
+                    //println($"{ elem.Key }: factor: { elem.Value }, prio: { getPrio(itemCounts, elem) }");
+                }
+            }
+
+
+            /*foreach (var elem in sorted) {
+                println($"{ elem.Key }: factor: { elem.Value }, prio: { getPrio(itemCounts, elem) }");
+            }*/
+
+            //var ingotName = sorted.First().Key;
+
+            //println($"Refined ore: { ingotName }, ");
+            //var oreToRefine = getOreFromIngotName(ingotName);
 
             GridTerminalSystem.GetBlocksOfType<IMyRefinery>(blocks, refinery => {
                 var refineryInput = refinery.GetInventory(0).GetItems();
 
                 //Check if the refinery is doing anything it shouldn't
                 return refineryInput.Count == 0 || 
-                    refineryInput.Exists(item => item.Content.SubtypeName != oreToRefine);
+                    refineryInput.Exists(item => getName(item) != oreToRefine);
             });
 
-            var containers = new List<IMyCargoContainer>();
-
-            GridTerminalSystem.GetBlocksOfType(containers);
+            
 
             var resourceAavailable = itemCounts[oreToRefine];
             var resourcePerRefinery = (double)resourceAavailable / blocks.Count;
@@ -480,8 +510,36 @@ namespace IngameScript
                 else//If refinery does not have enough, request more
                     requestItems(refInventory, oreToRefine, resourcePerRefinery - amountAlreadyInRef, containers);
             }
+
+            println($"Ore to refine: { oreToRefine }, ");
         }
 
+        /// <summary>
+        /// Gets ore name from corresponding ingot name. For example "Iron Ingot" becomes "Iron"
+        /// </summary>
+        /// <param name="ingotName">Ingot name</param>
+        /// <returns>Ore name</returns>
+        private string getOreFromIngotName(string ingotName)
+        {
+            return "Ore " + ingotName.Split(' ')[1];
+        }
+
+        /// <summary>
+        /// Get priority value representing how high the priority currently is to refine a specific metal
+        ///
+        /// Low value means high priority
+        /// </summary>
+        /// <param name="itemCounts"></param>
+        /// <param name="factorElem"></param>
+        /// <returns>Low value means high priority</returns>
+        private double getPrio(Dictionary<string, VRage.MyFixedPoint> itemCounts, KeyValuePair<string, double> factorElem)
+        {
+            var itemName = factorElem.Key;
+            var factor = factorElem.Value;
+            var itemCount = itemCounts.ContainsKey(factorElem.Key) ?
+                            itemCounts[itemName] : 0;
+            return (double)itemCount / factor;
+        }
 
 
         /// <summary>
@@ -558,7 +616,7 @@ namespace IngameScript
 
             var srcItems = src.GetItems();
             for (int i = 0; i < srcItems.Count && !dst.IsFull;) {
-                string name = srcItems[i].Content.SubtypeName;
+                string name = getName(srcItems[i]);
                 if (filter != null && !filter(name)) {
                     i++;
                     continue;
@@ -585,7 +643,6 @@ namespace IngameScript
             return totalAmountTransferred;
         }
 
-
         /// <summary>
         /// Get the amount of items matching the filter, if no filter is specified the total amount is returned
         /// </summary>
@@ -604,11 +661,73 @@ namespace IngameScript
                 }
             }
             else {
-                foreach (var item in items.Where(item => filter(item.Content.SubtypeName))) {
+                foreach (var item in items.Where(item => filter(getName(item)))) {
                     amount += item.Amount;
                 }
             }
             return amount;
+        }
+
+
+        /// <summary>
+        /// Check wether item is an ore
+        /// </summary>
+        /// <param name="item"></param>
+        /// <returns></returns>
+        private bool isOre(IMyInventoryItem item, bool includeIce, bool includeStone) {
+            var name = getName(item);
+            return isOre(name, includeIce, includeStone);
+        }
+
+        private string getName(IMyInventoryItem item) {
+            return item.Content.TypeId.ToString().Substring(16) + ' ' + item.Content.SubtypeName;
+        }
+
+        /// <summary>
+        /// Check wether item is an ore
+        /// </summary>
+        /// <param name="itemName">Name of potential ore</param>
+        /// <returns></returns>
+        private bool isOre(string itemName, bool includeIce, bool includeStone) {
+            HashSet<string> ores = new HashSet<string>(){
+                "Uranium",
+                "Silver",
+                "Magnesium",
+                "Silicon",
+                "Platinum",
+                "Gold",
+                "Cobalt",
+                "Nickel",
+                "Iron"
+            };
+
+            if (includeIce && itemName == "Ice")
+                return true;
+            if (includeStone && itemName == "Stone")
+                return true;
+
+            return ores.Contains(itemName);
+        }
+
+        /// <summary>
+        /// Check wether item is a refined ore
+        /// </summary>
+        /// <param name="item"></param>
+        /// <returns></returns>
+        private bool isRefined(IMyInventoryItem item) {
+            var name = getName(item);
+            HashSet<string> names = new HashSet<string>(){
+                "Uranium Ingot",
+                "Silver Ingot",
+                "Magnesium Powder",
+                "Silicon Wafer",
+                "Platinum Ingot",
+                "Gold Ingot",
+                "Cobalt Ingot",
+                "Nickel Ingot",
+                "Iron Ingot"
+            };
+            return names.Contains(name);
         }
 
         private double min(double a, double b) {
@@ -625,7 +744,7 @@ namespace IngameScript
             {
                 foreach (var item in inventory.GetInventory(0).GetItems())
                 {
-                    var name = item.Content.SubtypeName;
+                    var name = getName(item);
                     items.Add(name);
                 }
             }
@@ -686,7 +805,6 @@ namespace IngameScript
 
 
         string msg;
-        bool suppressWarnings;
 
         //Scratch container for blocks
         List<IMyTerminalBlock> blocks;
@@ -694,5 +812,7 @@ namespace IngameScript
         Dictionary<string, double> itemFactors;
         List<IMyTerminalBlock> trackedBlocks;
         string trackedBlockStatus;
+
+        int itemTickTock = 0;
     }
 }
