@@ -63,7 +63,7 @@ namespace IngameScript
                 { "Ingot Gold",       4.0 },
                 { "Ingot Cobalt",     8.0 },
                 { "Ingot Nickel",     16.0 },
-                //{ "Iron Ingot",       64.0 },
+                { "Ingot Iron",       64.0 },
             };
 
 
@@ -344,38 +344,61 @@ namespace IngameScript
         private void update() {
             var inventories = blocks;
             GridTerminalSystem.GetBlocksOfType(inventories, block => block.HasInventory);
-
-
+            
             Dictionary<string, VRage.MyFixedPoint> itemCounts = new Dictionary<string, VRage.MyFixedPoint>();
 
             foreach (var inventory in inventories) {
                 foreach (var item in inventory.GetInventory(0).GetItems()) {
                     var name = getName(item);
-                    
+
                     if (itemCounts.ContainsKey(name))
                         itemCounts[name] += item.Amount;
                     else
                         itemCounts.Add(name, item.Amount);
                 }
             }
-
-            clear();
-            println("Begin");
-
-            foreach (var elem in itemCounts) {
-                println($"{ elem.Key }: amount: { elem.Value }");
-            }
-
-            /*foreach (var elem in itemFactors) {
-                if (itemCounts.ContainsKey(elem.Key))
-                    println($"{ elem.Key }: factor: { elem.Value }, prio: { getPrio(itemCounts, elem) }");
-            }*/
-
-            println("End");
-
+            
+            outputRefiningStatus(itemCounts);
+            
             manageItems(itemCounts);
             //updateHydrogenFuel(itemCounts);
             //trackBlocksCheck();
+        }
+
+        private void outputRefiningStatus(Dictionary<string, VRage.MyFixedPoint> itemCounts) {
+            printlnTo("Material     Ingot     Ore     Prio", "PressurePanel", false);
+            var w1 = 10;
+            var w = 7;
+
+            foreach (var elem in itemFactors.OrderBy(elem => elem.Key)) {
+                var ore = getOreFromIngotName(elem.Key);
+                var material = elem.Key.Split(' ')[1];
+                var ingotMass = itemCounts.ContainsKey(elem.Key) ? (int)itemCounts[elem.Key] : 0;
+                var oreMass = itemCounts.ContainsKey(ore) ? (int)itemCounts[ore] : 0;
+                var prio = (int)getPrio(itemCounts, elem);
+                printlnTo($"{ paddRight(material, w1) }{ paddLeft(ingotMass, w) } kg{ paddLeft(oreMass, w) } kg{ paddLeft(prio, w - 2) }", "PressurePanel", true);
+                
+            }
+            /*
+            foreach (var elem in itemCounts.OrderBy(elem => elem.Key)) {
+                if (isIngot(elem.Key))
+                    printlnTo($"{ elem.Key }: { (int)elem.Value }kg", "PressurePanel", true);
+            }*/
+
+            GridTerminalSystem.GetBlocksOfType<IMyRefinery>(blocks);
+            HashSet<string> oresBeingRefined = new HashSet<string>();
+            foreach(var block in blocks) {
+                var refinery = block as IMyRefinery;
+                var items = refinery.GetInventory(0).GetItems();
+                foreach(var item in items) {
+                    oresBeingRefined.Add(getName(item));
+                }
+            }
+
+            printlnTo("\nOre(s) being refined", "PressurePanel", true);
+            foreach (var ore in oresBeingRefined) {
+                printlnTo($"\t{ ore }", "PressurePanel", true);
+            }
         }
 
         private void updateHydrogenFuel(Dictionary<string, VRage.MyFixedPoint> itemCounts) {
@@ -432,15 +455,19 @@ namespace IngameScript
                         }
                     }
                     break;
+                case 4:
+                    //Collect refined ore from refineries
+                    GridTerminalSystem.GetBlocksOfType<IMyCryoChamber>(blocks);
+                    foreach (var block in blocks) {
+                        var cryo = block as IMyCryoChamber;
+                        var refineryOutput = cryo.GetInventory(0);
+                        dumpItems(refineryOutput, containers);
+                    }
+                    break;
                 default:
                     break;
             }
-            itemTickTock = (itemTickTock + 1) % 4;
-        }
-
-        void sortInventory(List<IMyCargoContainer> containers) {
-
-            
+            itemTickTock = (itemTickTock + 1) % 5;
         }
         
         /// <summary>
@@ -463,26 +490,13 @@ namespace IngameScript
 
             foreach(var elem in itemFactors) {
                 var oreName = getOreFromIngotName(elem.Key);
-                println($"{ elem.Key }: Ore name: { oreName }");
                 if (itemCounts.ContainsKey(oreName)) {
                     if (getPrio(itemCounts, elem) < bestPrio) {
-                        //println($"{ elem.Key }: prio: { getPrio(itemCounts, elem) } < { oreToRefine }: prio: { bestPrio }");
                         oreToRefine = oreName;
                         bestPrio = getPrio(itemCounts, elem);
                     }
-                    //println($"{ elem.Key }: factor: { elem.Value }, prio: { getPrio(itemCounts, elem) }");
                 }
-            }
-
-
-            /*foreach (var elem in sorted) {
-                println($"{ elem.Key }: factor: { elem.Value }, prio: { getPrio(itemCounts, elem) }");
-            }*/
-
-            //var ingotName = sorted.First().Key;
-
-            //println($"Refined ore: { ingotName }, ");
-            //var oreToRefine = getOreFromIngotName(ingotName);
+            }           
 
             GridTerminalSystem.GetBlocksOfType<IMyRefinery>(blocks, refinery => {
                 var refineryInput = refinery.GetInventory(0).GetItems();
@@ -493,7 +507,6 @@ namespace IngameScript
             });
 
             
-
             var resourceAavailable = itemCounts[oreToRefine];
             var resourcePerRefinery = (double)resourceAavailable / blocks.Count;
 
@@ -510,7 +523,7 @@ namespace IngameScript
                 else//If refinery does not have enough, request more
                     requestItems(refInventory, oreToRefine, resourcePerRefinery - amountAlreadyInRef, containers);
             }
-
+            
             println($"Ore to refine: { oreToRefine }, ");
         }
 
@@ -689,45 +702,22 @@ namespace IngameScript
         /// <param name="itemName">Name of potential ore</param>
         /// <returns></returns>
         private bool isOre(string itemName, bool includeIce, bool includeStone) {
-            HashSet<string> ores = new HashSet<string>(){
-                "Uranium",
-                "Silver",
-                "Magnesium",
-                "Silicon",
-                "Platinum",
-                "Gold",
-                "Cobalt",
-                "Nickel",
-                "Iron"
-            };
 
-            if (includeIce && itemName == "Ice")
-                return true;
-            if (includeStone && itemName == "Stone")
-                return true;
+            if (!includeIce && itemName == "Ore Ice")
+                return false;
+            if (!includeStone && itemName == "Ore Stone")
+                return false;
 
-            return ores.Contains(itemName);
+            return itemName.StartsWith("Ore");
         }
 
         /// <summary>
         /// Check wether item is a refined ore
         /// </summary>
-        /// <param name="item"></param>
+        /// <param name="itemName"></param>
         /// <returns></returns>
-        private bool isRefined(IMyInventoryItem item) {
-            var name = getName(item);
-            HashSet<string> names = new HashSet<string>(){
-                "Uranium Ingot",
-                "Silver Ingot",
-                "Magnesium Powder",
-                "Silicon Wafer",
-                "Platinum Ingot",
-                "Gold Ingot",
-                "Cobalt Ingot",
-                "Nickel Ingot",
-                "Iron Ingot"
-            };
-            return names.Contains(name);
+        private bool isIngot(string itemName) {
+            return itemName.StartsWith("Ingot");
         }
 
         private double min(double a, double b) {
@@ -799,6 +789,32 @@ namespace IngameScript
             var lcd = GridTerminalSystem.GetBlockWithName("LCD block damage") as IMyTextPanel;
             if(lcd != null)
                 lcd.WritePublicText(trackedBlockStatus, false);
+        }
+
+        void printTo(string msg, string panelName, bool append = false) {
+            var lcd = GridTerminalSystem.GetBlockWithName(panelName) as IMyTextPanel;
+            lcd.WritePublicText(msg, append);
+        }
+
+        void printlnTo(string msg, string panelName, bool append = false) {
+            var lcd = GridTerminalSystem.GetBlockWithName(panelName) as IMyTextPanel;
+            lcd.WritePublicText(msg + '\n', append);
+        }
+
+        string paddRight(int val, int length) {
+            return paddRight(val.ToString(), length);
+        }
+
+        string paddRight(string str, int length) {
+            return str.PadRight(length);
+        }
+
+        string paddLeft(int val, int length) {
+            return paddLeft(val.ToString(), length);
+        }
+
+        string paddLeft(string str, int length) {
+            return str.PadLeft(length);
         }
 
         const double ORE_MASS_PER_COUNT = 2.7;
